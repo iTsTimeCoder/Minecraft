@@ -59,6 +59,24 @@ def is_version_installed(version_id):
     version_jar = os.path.join(minecraft_directory, "versions", version_id, f"{version_id}.jar")
     return os.path.exists(version_jar)
 
+def install_version_with_retry(version_id, attempts=5):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            minecraft_launcher_lib.install.install_minecraft_version(
+                version=version_id,
+                minecraft_directory=minecraft_directory,
+                callback={"setStatus": set_status, "setProgress": set_progress}
+            )
+            return True
+        except Exception as e:
+            last_error = e
+            print(f"{C_YELLOW}[Retry {attempt}/{attempts}] Download interrupted ({e}). Retrying in 3 seconds...{C_RESET}")
+            if attempt < attempts:
+                time.sleep(3)
+    print(f"{C_RED}Installation failed after {attempts} attempts: {last_error}{C_RESET}")
+    return False
+
 def get_system_ram_suggestion():
     try:
         # قراءة حجم الرام الكلي في لينكس
@@ -77,13 +95,23 @@ def get_system_ram_suggestion():
     except:
         return 8, 4096
 
-def find_java_executable():
+def find_java_executable(version_id):
     runtime_dir = os.path.join(minecraft_directory, "runtime")
+    
     if os.path.exists(runtime_dir):
+        runtimes = ["java-runtime-epsilon", "java-runtime-delta", "java-runtime-gamma", "java-runtime-beta", "jre-legacy"]
+        
+        for rt in runtimes:
+            rt_path = os.path.join(runtime_dir, rt)
+            if os.path.exists(rt_path):
+                for root, dirs, files in os.walk(rt_path):
+                    if "java" in files:
+                        return os.path.join(root, "java")
+
         for root, dirs, files in os.walk(runtime_dir):
-            for file in files:
-                if file == "java":
-                    return os.path.join(root, file)
+            if "java" in files:
+                return os.path.join(root, "java")
+                
     return "java"
 
 def change_version(settings):
@@ -102,10 +130,68 @@ def change_version(settings):
     except:
         print(f"  {C_RED}Could not read local versions.{C_RESET}")
     print(f"{C_CYAN}========================================{C_RESET}")
-    new_ver = input(f" {C_GREEN}Enter Version ID (e.g., 1.16.5, 1.20.1):{C_RESET} ").strip()
+    print(f" {C_WHITE}[1]{C_RESET} Releases (Stable)")
+    print(f" {C_WHITE}[2]{C_RESET} Snapshots (Experimental)")
+    print(f" {C_WHITE}[3]{C_RESET} Type Version ID Manually")
+    print(f"{C_CYAN}========================================{C_RESET}")
+    choice = input(f" {C_GREEN}Select an option (1-3):{C_RESET} ").strip()
+
+    new_ver = ""
+    if choice in ("1", "2"):
+        ver_type = "release" if choice == "1" else "snapshot"
+        clear_console()
+        print(f"{C_CYAN}Fetching {ver_type} versions from Mojang servers...{C_RESET}")
+        try:
+            version_list = minecraft_launcher_lib.utils.get_version_list()
+            ids = [v["id"] for v in version_list if v["type"] == ver_type]
+        except Exception as e:
+            print(f"{C_RED}Failed to fetch versions: {e}{C_RESET}")
+            input("\nPress Enter to return...")
+            return
+        if not ids:
+            print(f"{C_RED}No {ver_type} versions found.{C_RESET}")
+            input("\nPress Enter to return...")
+            return
+
+        filter_text = input(f" {C_GREEN}Filter (e.g., 1.20 or 26.2) [Enter = show all]:{C_RESET} ").strip().lower()
+        if filter_text:
+            ids = [v for v in ids if filter_text in v.lower()]
+        if not ids:
+            print(f"{C_RED}No versions match your filter.{C_RESET}")
+            input("\nPress Enter to return...")
+            return
+
+        print(f"\n{C_CYAN}Available versions ({len(ids)}):{C_RESET}")
+        shown = ids[:100]
+        for idx, vid in enumerate(shown):
+            print(f"  {C_WHITE}[{idx + 1}]{C_RESET} {vid}")
+        if len(ids) > len(shown):
+            print(f"  {C_YELLOW}... and {len(ids) - len(shown)} more (use the filter to narrow down){C_RESET}")
+
+        sel = input(f"\n {C_GREEN}Select a version number (1-{len(shown)}):{C_RESET} ").strip()
+        if sel.isdigit() and 1 <= int(sel) <= len(shown):
+            new_ver = shown[int(sel) - 1]
+        else:
+            print(f"{C_RED}Invalid selection.{C_RESET}")
+            input("\nPress Enter to return...")
+            return
+    else:
+        new_ver = input(f" {C_GREEN}Enter Version ID (e.g., 1.16.5, 26.2):{C_RESET} ").strip()
+
     if new_ver:
         settings["version"] = new_ver
         save_settings(settings)
+        print(f"\n{C_CYAN}Selected version:{C_RESET} {C_YELLOW}{new_ver}{C_RESET}")
+        if not is_version_installed(new_ver):
+            print(f"{C_YELLOW}Version not installed. Downloading automatically (auto-retry enabled)...{C_RESET}")
+            if install_version_with_retry(new_ver):
+                print(f"{C_GREEN}Version {new_ver} installed successfully!{C_RESET}")
+            else:
+                print(f"{C_RED}Installation could not be completed due to network issues.{C_RESET}")
+                print(f"{C_YELLOW}Don't worry: the launcher will retry the download automatically when you press 'Launch'.{C_RESET}")
+        else:
+            print(f"{C_GREEN}Version already installed. Ready to launch.{C_RESET}")
+    input("\nPress Enter to return...")
 
 def change_ram(settings):
     clear_console()
@@ -250,7 +336,7 @@ def install_modloaders(settings):
             print(f"{C_CYAN}Step 1/2:{C_RESET} Verifying base vanilla files for {settings['version']}...")
             try:
                 if not is_version_installed(settings["version"]):
-                    minecraft_launcher_lib.install.install_minecraft_version(settings["version"], minecraft_directory)
+                    install_version_with_retry(settings["version"])
                 
                 print(f"\n{C_CYAN}Step 2/2:{C_RESET} Fetching and installing latest Fabric loader...")
                 minecraft_launcher_lib.fabric.install_fabric(settings["version"], minecraft_directory, callback={"setStatus": set_status, "setProgress": set_progress})
@@ -266,7 +352,7 @@ def install_modloaders(settings):
             print(f"{C_CYAN}Step 1/2:{C_RESET} Verifying base vanilla files for {settings['version']}...")
             try:
                 if not is_version_installed(settings["version"]):
-                    minecraft_launcher_lib.install.install_minecraft_version(settings["version"], minecraft_directory)
+                    install_version_with_retry(settings["version"])
                 
                 print(f"\n{C_CYAN}Step 2/2:{C_RESET} Searching available Forge versions for {settings['version']}...")
                 forge_version = minecraft_launcher_lib.forge.find_forge_version(settings["version"])
@@ -322,11 +408,7 @@ def main():
             try:
                 if not is_version_installed(settings["version"]):
                     print(f"{C_YELLOW}Files missing or first time launch. Downloading game files...{C_RESET}")
-                    minecraft_launcher_lib.install.install_minecraft_version(
-                        version=settings["version"],
-                        minecraft_directory=minecraft_directory,
-                        callback={"setStatus": set_status, "setProgress": set_progress}
-                    )
+                    install_version_with_retry(settings["version"])
                 else:
                     print(f"{C_GREEN}Game files verified successfully. Preparing to launch...{C_RESET}")
                 
